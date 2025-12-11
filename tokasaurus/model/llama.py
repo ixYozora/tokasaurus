@@ -362,9 +362,20 @@ class LlamaBlock(nn.Module):
 @torch.library.custom_op("tokasaurus::sample_from_probs", mutates_args=())
 def sample_from_probs(probs: Tensor) -> Tensor:
     batch_size = probs.shape[0]
+    # Generate uniform samples ourselves to avoid generator creation during graph capture
     uniform = torch.rand(batch_size, device=probs.device, dtype=probs.dtype)
-    samples = sampling_from_probs(probs, uniform)
-    return samples
+
+    # Manually implement categorical sampling using cumsum + searchsorted
+    # This avoids flashinfer's internal generator creation
+    cumsum_probs = torch.cumsum(probs, dim=-1)
+    # searchsorted finds the index where uniform would be inserted to maintain sorted order
+    # This effectively samples from the categorical distribution
+    samples = torch.searchsorted(cumsum_probs, uniform.unsqueeze(-1)).squeeze(-1)
+
+    # Clamp to valid range (in case of numerical errors)
+    samples = samples.clamp(max=probs.shape[-1] - 1)
+
+    return samples.int()
 
 
 @sample_from_probs.register_fake
@@ -720,7 +731,7 @@ class LlamaForCausalLM(nn.Module):
                 paged_kv_last_page_len=prefill_info.kv_last_page_len,
                 num_kv_heads=num_kv_heads,
                 num_qo_heads=num_qo_heads,
-                head_dim=head_dim,
+                head_dim_qk=head_dim,
                 page_size=page_size,
                 q_data_type=q_data_type,
                 kv_data_type=kv_data_type,
@@ -739,7 +750,7 @@ class LlamaForCausalLM(nn.Module):
                 paged_kv_last_page_len=hydragen_info.kv_last_page_len,
                 num_kv_heads=num_kv_heads,
                 num_qo_heads=num_qo_heads,
-                head_dim=head_dim,
+                head_dim_qk=head_dim,
                 page_size=page_size,
                 q_data_type=q_data_type,
                 kv_data_type=kv_data_type,
