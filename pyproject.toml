@@ -30,7 +30,6 @@ dependencies = [
     "loguru",
     "python-multipart",
     "torch",
-    "flashinfer-python",
     "tqdm",
 ]
 
