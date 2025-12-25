@@ -2,7 +2,7 @@ import time
 from itertools import chain
 
 import torch.multiprocessing as mp
-
+mp.set_sharing_strategy('file_system')
 from tokasaurus.common_types import TimedBarrier
 from tokasaurus.manager.allocator import (
     BatchIndexAllocator,
