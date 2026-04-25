@@ -534,11 +534,12 @@ def sanitize_cartridge_id(cartridge_id: str) -> str:
     if not cartridge_id or not cartridge_id.strip():
         raise ValueError("Cartridge ID cannot be empty")
 
-    # Replace forward slashes and backslashes with dashes
-    sanitized = cartridge_id.replace("/", "-").replace("\\", "-")
+    # If it's an absolute path, don't sanitize it, just return it
+    if cartridge_id.startswith("/"):
+        return cartridge_id
 
-    # Replace other problematic characters with underscores
-    # This includes: colon, pipe, question mark, asterisk, angle brackets, quotes
+    # Original sanitization logic for non-absolute IDs (WandB etc)
+    sanitized = cartridge_id.replace("/", "-").replace("\\", "-")
     sanitized = re.sub(r'[:|*?<>"\'\x00-\x1f\x7f]', "_", sanitized)
 
     # Handle path traversal sequences more aggressively

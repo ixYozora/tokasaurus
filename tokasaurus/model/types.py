@@ -445,8 +445,14 @@ class CartridgeManager:
             return  # Already loaded
         
         # Load from disk (use sanitized ID for directory path)
+        # Load from disk (use sanitized ID for directory path)
         sanitized_id = sanitize_cartridge_id(cartridge_id)
-        cartridge_path = f"{cartridge_dir}/{sanitized_id}/cartridge.pt"
+
+        # Check if sanitized_id is an absolute path
+        if sanitized_id.startswith("/"):
+            cartridge_path = f"{sanitized_id}/cartridge.pt"
+        else:
+            cartridge_path = f"{cartridge_dir}/{sanitized_id}/cartridge.pt"
         try:
             state_dict = torch.load(cartridge_path, map_location=self.model.device, weights_only=False)
         except FileNotFoundError:

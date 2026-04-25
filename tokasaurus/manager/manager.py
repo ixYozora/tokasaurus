@@ -3,7 +3,7 @@ from itertools import chain
 from pathlib import Path
 
 import torch.multiprocessing as mp
-
+mp.set_sharing_strategy('file_system')
 from tokasaurus.common_types import TimedBarrier
 from tokasaurus.manager.allocator import (
     BatchIndexAllocator,
@@ -65,17 +65,20 @@ def can_schedule_sequence(state: ManagerState, seq: Sequence) -> bool:
     """Check if sequence can be scheduled (all cartridges ready)."""
     if not seq.prepended_cartridge_ids:
         return True
-        
+
     for cartridge_id in seq.prepended_cartridge_ids:
         if cartridge_id in state.cartridges_downloading:
             return False  # Still downloading
-            
+
         # Check if cartridge exists (use sanitized ID for directory path)
         sanitized_id = sanitize_cartridge_id(cartridge_id)
-        cartridge_path = Path(state.config.cartridge_dir) / sanitized_id
+        if sanitized_id.startswith("/"):
+            cartridge_path = Path(sanitized_id)
+        else:
+            cartridge_path = Path(state.config.cartridge_dir) / sanitized_id
         if not (cartridge_path / "cartridge.pt").exists():
             return False  # Not available
-    
+
     return True
 
 
@@ -83,26 +86,26 @@ def check_and_request_downloads(state: ManagerState, cartridges: list[dict] | No
     """Check cartridge availability and request downloads if needed."""
     if not cartridges:
         return
-    
+
     for cartridge in cartridges:
         cartridge_id = cartridge["id"]
         source = cartridge["source"]
         force_redownload = cartridge.get("force_redownload", False)
-        
+
         if source == "local":
             # Local cartridges should already exist, just validate them
             state.load_cartridge_config(cartridge_id)
             continue
         else:
-            
+
             # Check if wandb cartridge exists locally (use sanitized ID for directory path)
             sanitized_id = sanitize_cartridge_id(cartridge_id)
             cartridge_path = Path(state.config.cartridge_dir) / sanitized_id
             files_exist = (cartridge_path / "cartridge.pt").exists()
-            
+
             # Download if files don't exist OR if force_redownload is True
             should_download = not files_exist or force_redownload
-            
+
             if should_download:
                 # Only request download if not already downloading
                 # First, validate that the cartridge exists remotely before starting download
@@ -124,20 +127,20 @@ def fail_sequence_with_error(state: ManagerState, seq: Sequence, error_message: 
     """Fail a sequence with an error message."""
     if seq.output is None:
         return
-    
+
     # Create error response
     seq.output.completion_ids = [[] for _ in range(seq.request.n if seq.request else 1)]
     seq.output.logprobs = [[] for _ in range(seq.request.n if seq.request else 1)]
     seq.output.finish_reason = ["error" for _ in range(seq.request.n if seq.request else 1)]
     seq.output.num_cached_prompt_tokens = [0 for _ in range(seq.request.n if seq.request else 1)]
     seq.output.error_message = error_message
-    
+
     # Send error response back to server
     state.q_manager_to_server.put(seq.output)
-    
+
     # Clean up sequence from queue
     state.scheduling_queue.remove_queued(seq.id)
-    
+
     # Clean up request tracking if this was the last sequence for the request
     if seq.request and seq.request.id in state.req_id_to_seq_ids:
         state.req_id_to_seq_ids[seq.request.id].discard(seq.id)
@@ -149,17 +152,17 @@ def handle_download_completions(state: ManagerState):
     """Process completed downloads."""
     for response in queue_iterator(state.q_download_complete):
         cartridge_id = response.cartridge_id
-        
+
         if response.success:
             state.logger.info(f"Cartridge {cartridge_id} download completed")
-            
+
             # Reset loading state for force redownloads so cartridge gets reloaded with new weights
             if response.force_redownload:
                 state.reset_cartridge_loading_state(cartridge_id)
-            
+
             # Remove from downloading set
             state.cartridges_downloading.discard(cartridge_id)
-            
+
             # Check if any sequences were waiting for this cartridge
             state.logger.info(f"Cartridge {cartridge_id} in sequences waiting for cartridges: {state.sequences_waiting_for_cartridges}")
             if cartridge_id in state.sequences_waiting_for_cartridges:
@@ -167,13 +170,13 @@ def handle_download_completions(state: ManagerState):
                 waiting_seq_ids = state.sequences_waiting_for_cartridges.pop(cartridge_id)
                 state.logger.info(f"{len(waiting_seq_ids)} sequences can now be scheduled after {cartridge_id} download")
                 # These sequences will be picked up in the next scheduling cycle
-                
+
         else:
             state.logger.error(f"Cartridge {cartridge_id} download failed: {response.error_message}")
-            
+
             # Remove from downloading set
             state.cartridges_downloading.discard(cartridge_id)
-            
+
             # Fail any sequences waiting for this cartridge
             if cartridge_id in state.sequences_waiting_for_cartridges:
                 waiting_seq_ids = state.sequences_waiting_for_cartridges.pop(cartridge_id)
@@ -197,10 +200,10 @@ def send_to_model(state: ManagerState, command):
 def extract_required_cartridges(state: ManagerState, decision: ScheduleDecision) -> dict[str, list[int]]:
     """Extract cartridge requirements from a scheduling decision."""
     required_cartridges = {}
-    
+
     # Check all sequences in the decision for cartridge requirements
     all_seqs = decision.decoding_seqs + [seq for seq, _ in decision.prefill_seqs]
-    
+
     for seq in all_seqs:
         if seq.prepended_cartridge_ids and seq.cartridge_indices:
             # Group cartridge indices by cartridge_id
@@ -208,19 +211,19 @@ def extract_required_cartridges(state: ManagerState, decision: ScheduleDecision)
             for cartridge_id in seq.prepended_cartridge_ids:
                 config = state.load_cartridge_config(cartridge_id)
                 num_blocks = config.num_blocks_needed(state.config.page_size)
-                
+
                 # Extract the block indices for this cartridge
                 cartridge_blocks = seq.cartridge_indices[cartridge_idx:cartridge_idx + num_blocks]
-                
+
                 if cartridge_id not in required_cartridges:
                     required_cartridges[cartridge_id] = cartridge_blocks
                 else:
                     # Verify that the same cartridge uses the same blocks across sequences
                     if required_cartridges[cartridge_id] != cartridge_blocks:
                         state.logger.warning(f"Cartridge {cartridge_id} has different block allocations across sequences")
-                
+
                 cartridge_idx += num_blocks
-    
+
     return required_cartridges
 
 
@@ -275,22 +278,22 @@ def handle_new_server_commands(state: ManagerState):
                     for sid in sids:
                         cartridge_info_list = []
                         prepended_cartridge_ids = None
-                        
+
                         if req.cartridges:
                             # Convert Cartridge objects to info dicts and extract IDs
                             cartridge_info_list = [
                                 {
                                     "id": cartridge.id,
-                                    "source": cartridge.source, 
+                                    "source": cartridge.source,
                                     "force_redownload": cartridge.force_redownload
                                 }
                                 for cartridge in req.cartridges
                             ]
                             prepended_cartridge_ids = tuple(sorted(cartridge.id for cartridge in req.cartridges))
-                            
+
                             # Store cartridge info in state for later use during downloading
                             state.store_cartridge_info(cartridge_info_list)
-                        
+
                             # Validate local cartridge configs and request downloads if needed
                             check_and_request_downloads(state, cartridge_info_list)
 
@@ -308,18 +311,18 @@ def handle_new_server_commands(state: ManagerState):
                         state.scheduling_queue.add_queued(seq)
 
                     state.req_id_to_seq_ids[req.id] = set(sids)
-                    
+
                 except (FileNotFoundError, ValueError) as e:
                     # Handle cartridge loading errors gracefully
                     state.logger.error(f"Error processing request {req.id}: {e}")
-                    
+
                     # Create error response
                     output.completion_ids = [[] for _ in range(req.n)]
                     output.logprobs = [[] for _ in range(req.n)]
                     output.finish_reason = ["error" for _ in range(req.n)]
                     output.num_cached_prompt_tokens = [0 for _ in range(req.n)]
                     output.error_message = str(e)
-                    
+
                     # Send error response back to server
                     state.q_manager_to_server.put(output)
                     continue
@@ -732,7 +735,7 @@ def sanity_check_block_usage(
 ):
     actual_used_blocks = state.block_allocator.num_used_blocks()
     expected_used_blocks = block_usage_over_time.points[0].num_used_blocks_after_allocation
-    
+
     # With cartridge blocks, there can be a discrepancy between actual and expected block usage
     # because the simulation doesn't fully account for pre-allocated cartridge blocks.
     # For now, we'll allow the actual usage to be >= expected usage to handle this case.
@@ -796,7 +799,7 @@ def coarse_onboard(
         num_blocks_needed = seq.expected_num_additional_blocks(
             config.page_size, add_buffer=True
         )
-        
+
         # Add cartridge overhead
         if seq.prepended_cartridge_ids:
             for cartridge_id in seq.prepended_cartridge_ids:
@@ -851,7 +854,7 @@ def precise_onboard(
     config = state.config
 
     reversed_queued_seqs = list(state.scheduling_queue.queued_seqs.values())
-    
+
     # Filter to only sequences that can be scheduled
     schedulable_seqs = []
     for seq in reversed_queued_seqs:
@@ -865,10 +868,10 @@ def precise_onboard(
                         if cartridge_id not in state.sequences_waiting_for_cartridges:
                             state.sequences_waiting_for_cartridges[cartridge_id] = set()
                         state.sequences_waiting_for_cartridges[cartridge_id].add(seq.id)
-    
+
     # Reverse the list to process in FIFO order
     schedulable_seqs.reverse()
-    
+
     existing_prefill_seqs = list(state.scheduling_queue.prefilling_seqs.values())
 
     num_running_seqs = state.scheduling_queue.num_running_seqs()
@@ -1122,12 +1125,12 @@ def has_schedulable_sequences(state: ManagerState) -> bool:
     # If there are running sequences, we can always schedule
     if state.scheduling_queue.num_running_seqs() > 0:
         return True
-    
+
     # Check if any queued sequences can be scheduled (cartridges ready)
     for seq in state.scheduling_queue.queued_seqs.values():
         if can_schedule_sequence(state, seq):
             return True
-    
+
     return False
 
 
@@ -1306,10 +1309,10 @@ def manager_loop(config: ServerConfig, state: ManagerState):
         wait_time = time.time() - wait_start
 
         num_new_commands = handle_new_server_commands(state)
-        
+
         # Check for completed downloads and process pending requests
         handle_download_completions(state)
-        
+
         handle_new_model_outputs(state)
 
         try_cancelling_requests(state)

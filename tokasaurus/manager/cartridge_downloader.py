@@ -117,7 +117,8 @@ def download_cartridge_from_wandb(cartridge_id: str, cartridges_path: Path, forc
     try:
         # NOTE: hardcoded project. This might need to be configurable in the future.
         # Use original cartridge_id for API call, not sanitized version
-        run = api.run(f"hazy-research/{WANDB_PROJECT_ID}/{cartridge_id}")
+        #run = api.run(f"hazy-research/{WANDB_PROJECT_ID}/{cartridge_id}")
+        run = api.run(cartridge_id)
     except wandb.errors.CommError as e:
         logger.error(f"Could not find wandb run for cartridge_id: hazy-research/{WANDB_PROJECT_ID}/{cartridge_id}. Error: {e}")
         raise FileNotFoundError(f"Could not find wandb run for cartridge_id: hazy-research/{WANDB_PROJECT_ID}/{cartridge_id}") from e
@@ -404,7 +405,9 @@ def validate_cartridge_exists(cartridge_id: str, source: str, logger=None):
             try:
                 # Use original cartridge_id for API call
                 print(f"Checking if cartridge {cartridge_id} exists in wandb")
-                run = api.run(f"hazy-research/{WANDB_PROJECT_ID}/{cartridge_id}")
+                #run = api.run(f"hazy-research/{WANDB_PROJECT_ID}/{cartridge_id}")
+                # Use the cartridge_id directly
+                run = api.run(cartridge_id)
                 # Just check if we can access the run - don't download anything
                 logger.debug(f"Cartridge {cartridge_id} exists in wandb")
             except wandb.errors.CommError as e:

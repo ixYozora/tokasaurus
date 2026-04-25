@@ -101,7 +101,7 @@ class LlamaAttention(nn.Module):
     qkv_bias: bool = False
 
     def __init__(
-        self, config: LlamaConfig, extra_config: ExtraModelConfig, layer_idx: int
+            self, config: LlamaConfig, extra_config: ExtraModelConfig, layer_idx: int
     ):
         super().__init__()
         self.config = config
@@ -116,8 +116,8 @@ class LlamaAttention(nn.Module):
 
         assert self.config.num_attention_heads % self.tp_size == 0
         assert (
-            self.config.num_key_value_heads % self.tp_size == 0
-            or self.config.num_key_value_heads == 1
+                self.config.num_key_value_heads % self.tp_size == 0
+                or self.config.num_key_value_heads == 1
         )
 
         self.num_attention_heads = config.num_attention_heads // self.tp_size
@@ -131,22 +131,22 @@ class LlamaAttention(nn.Module):
             self.config.hidden_size,
             self.num_attention_heads * self.head_dim(),
             bias=self.qkv_bias,
-        )
+            )
         self.k_proj = nn.Linear(
             self.config.hidden_size,
             self.num_kv_heads * self.head_dim(),
             bias=self.qkv_bias,
-        )
+            )
         self.v_proj = nn.Linear(
             self.config.hidden_size,
             self.num_kv_heads * self.head_dim(),
             bias=self.qkv_bias,
-        )
+            )
         self.o_proj = nn.Linear(
             self.num_attention_heads * self.head_dim(),
             config.hidden_size,
             bias=False,
-        )
+            )
 
         self.layer_cache: LayerKVCache | None = None
 
@@ -164,11 +164,11 @@ class LlamaAttention(nn.Module):
             mutates_args=("k_cache", "v_cache"),
         )
         def attn_fn(
-            ragged_q: Tensor,
-            ragged_k: Tensor,
-            ragged_v: Tensor,
-            k_cache: Tensor,
-            v_cache: Tensor,
+                ragged_q: Tensor,
+                ragged_k: Tensor,
+                ragged_v: Tensor,
+                k_cache: Tensor,
+                v_cache: Tensor,
         ) -> Tensor:
             assert self.attention_info is not None
             assert self.wrapper_collection is not None
@@ -205,19 +205,19 @@ class LlamaAttention(nn.Module):
 
         @attn_fn.register_fake
         def _(
-            ragged_q: Tensor,
-            ragged_k: Tensor,
-            ragged_v: Tensor,
-            k_cache: Tensor,
-            v_cache: Tensor,
+                ragged_q: Tensor,
+                ragged_k: Tensor,
+                ragged_v: Tensor,
+                k_cache: Tensor,
+                v_cache: Tensor,
         ) -> Tensor:
             return torch.empty_like(ragged_q)
 
         return attn_fn
 
     def forward(
-        self,
-        batch_state: BatchState,
+            self,
+            batch_state: BatchState,
     ):
         assert batch_state.hidden_states is not None
         assert batch_state.position_embeddings is not None
@@ -271,8 +271,8 @@ class LlamaAttention(nn.Module):
         # skipped the sdpa call for these too, but that would screw with the
         # paging information.
         if (
-            self.layer_idx == self.config.num_hidden_layers - 1
-            and self.extra_config.tp_size == 1
+                self.layer_idx == self.config.num_hidden_layers - 1
+                and self.extra_config.tp_size == 1
         ):
             attn_output = attn_output[batch_state.lm_head_indices]
             residual = residual[batch_state.lm_head_indices]
@@ -289,7 +289,7 @@ class LlamaAttention(nn.Module):
 
 class LlamaMLP(nn.Module):
     def __init__(
-        self, config: LlamaConfig, extra_config: ExtraModelConfig, layer_idx: int
+            self, config: LlamaConfig, extra_config: ExtraModelConfig, layer_idx: int
     ):
         super().__init__()
         self.config = config
@@ -317,8 +317,8 @@ class LlamaMLP(nn.Module):
         self.input_layernorm = RMSNorm(config)
 
     def forward(
-        self,
-        batch_state: BatchState,
+            self,
+            batch_state: BatchState,
     ):
         inp = batch_state.hidden_states
         assert inp is not None
@@ -343,7 +343,7 @@ class LlamaBlock(nn.Module):
     attn_cls = LlamaAttention
 
     def __init__(
-        self, config: LlamaConfig, extra_config: ExtraModelConfig, layer_idx: int
+            self, config: LlamaConfig, extra_config: ExtraModelConfig, layer_idx: int
     ):
         super().__init__()
         self.config = config
@@ -362,9 +362,20 @@ class LlamaBlock(nn.Module):
 @torch.library.custom_op("tokasaurus::sample_from_probs", mutates_args=())
 def sample_from_probs(probs: Tensor) -> Tensor:
     batch_size = probs.shape[0]
+    # Generate uniform samples ourselves to avoid generator creation during graph capture
     uniform = torch.rand(batch_size, device=probs.device, dtype=probs.dtype)
-    samples = sampling_from_probs(probs, uniform)
-    return samples
+
+    # Manually implement categorical sampling using cumsum + searchsorted
+    # This avoids flashinfer's internal generator creation
+    cumsum_probs = torch.cumsum(probs, dim=-1)
+    # searchsorted finds the index where uniform would be inserted to maintain sorted order
+    # This effectively samples from the categorical distribution
+    samples = torch.searchsorted(cumsum_probs, uniform.unsqueeze(-1)).squeeze(-1)
+
+    # Clamp to valid range (in case of numerical errors)
+    samples = samples.clamp(max=probs.shape[-1] - 1)
+
+    return samples.int()
 
 
 @sample_from_probs.register_fake
@@ -375,10 +386,10 @@ def _(probs: Tensor) -> Tensor:
 
 
 def calc_tokens_and_logprobs(
-    logits: Tensor,
-    temperature: Tensor,
-    greedy_mask: Tensor,
-    config: ExtraModelConfig,
+        logits: Tensor,
+        temperature: Tensor,
+        greedy_mask: Tensor,
+        config: ExtraModelConfig,
 ):
     augmented_logits = logits
 
@@ -465,12 +476,6 @@ class LlamaLMHead(nn.Module):
             hidden_states = self.input_norm(needed_hidden_states)
 
             logits = self.lm_head(hidden_states).float()
-            # if not torch.cuda.is_current_stream_capturing():
-            #     print("batch_state:", batch_state)
-            #     if 32767 in batch_state.attention_info.prefill_info.kv_indices:
-            #         print("llama model logits:", logits)
-            #         torch.save(logits, "/tmp/tokasaurus_logits.pt")
-            #         raise Exception("Stop here")
 
             assert batch_state.sampling_params.top_p is None
             assert batch_state.sampling_params.temperature is not None
@@ -530,9 +535,9 @@ class LlamaModel(nn.Module):
     rope_sin: Tensor
 
     def __init__(
-        self,
-        config: LlamaConfig,
-        extra_config: ExtraModelConfig,
+            self,
+            config: LlamaConfig,
+            extra_config: ExtraModelConfig,
     ):
         super().__init__()
         self.config = config
@@ -583,16 +588,14 @@ class LlamaModel(nn.Module):
         sin = self.rope_sin[batch_state.position_ids]
         out.position_embeddings = (cos, sin)
 
-        for layer_idx, layer in enumerate(self.layers):
+        for layer in self.layers:
             out = layer(out)
-            if not torch.cuda.is_current_stream_capturing() and layer_idx == 0:
-                torch.save(out.hidden_states, "/tmp/tokasaurus_layer_0_hidden_states.pt")
         return out
 
 
 def calc_pipeline_layer_start_and_end(
-    config: LlamaConfig,
-    extra_config: ExtraModelConfig,
+        config: LlamaConfig,
+        extra_config: ExtraModelConfig,
 ):
     if extra_config.pp_size > 1:
         assert extra_config.pp_rank is not None
@@ -613,9 +616,9 @@ class LlamaForCausalLM(nn.Module):
     config_cls = LlamaConfig
 
     def __init__(
-        self,
-        config: LlamaConfig,
-        extra_config: ExtraModelConfig,
+            self,
+            config: LlamaConfig,
+            extra_config: ExtraModelConfig,
     ):
         super().__init__()
         self.config = config
@@ -650,9 +653,9 @@ class LlamaForCausalLM(nn.Module):
         return self.config.hidden_size // self.config.num_attention_heads
 
     def forward(
-        self,
-        batch_state: BatchState,
-        async_tp: bool = False,
+            self,
+            batch_state: BatchState,
+            async_tp: bool = False,
     ):
         self.async_tp = async_tp
 
@@ -718,7 +721,7 @@ class LlamaForCausalLM(nn.Module):
         kv_data_type = self.dtype
 
         if (
-            prefill_info := attn_info.prefill_info
+                prefill_info := attn_info.prefill_info
         ) is not None and prefill_info.num_tokens > 0:
             assert prefill_info.qo_indptr is not None
             wrappers.prefill_wrapper.plan(
@@ -728,7 +731,7 @@ class LlamaForCausalLM(nn.Module):
                 paged_kv_last_page_len=prefill_info.kv_last_page_len,
                 num_kv_heads=num_kv_heads,
                 num_qo_heads=num_qo_heads,
-                head_dim=head_dim,
+                head_dim_qk=head_dim,
                 page_size=page_size,
                 q_data_type=q_data_type,
                 kv_data_type=kv_data_type,
@@ -737,7 +740,7 @@ class LlamaForCausalLM(nn.Module):
             )
 
         if (
-            hydragen_info := attn_info.hydragen_info
+                hydragen_info := attn_info.hydragen_info
         ) is not None and hydragen_info.num_tokens > 0:
             assert hydragen_info.qo_indptr is not None
             wrappers.hydragen_wrapper.plan(
@@ -747,7 +750,7 @@ class LlamaForCausalLM(nn.Module):
                 paged_kv_last_page_len=hydragen_info.kv_last_page_len,
                 num_kv_heads=num_kv_heads,
                 num_qo_heads=num_qo_heads,
-                head_dim=head_dim,
+                head_dim_qk=head_dim,
                 page_size=page_size,
                 q_data_type=q_data_type,
                 kv_data_type=kv_data_type,
@@ -756,7 +759,7 @@ class LlamaForCausalLM(nn.Module):
             )
 
         if (
-            decode_info := attn_info.decode_info
+                decode_info := attn_info.decode_info
         ) is not None and decode_info.num_tokens > 0:
             wrappers.decode_wrapper.plan(
                 indptr=decode_info.kv_indptr,
@@ -780,11 +783,11 @@ class LlamaForCausalLM(nn.Module):
 
     @classmethod
     def from_pretrained(
-        cls,
-        model_name_or_path: str,
-        extra_config: ExtraModelConfig | None = None,
-        device: DeviceType | None = None,
-        dtype: torch.dtype | None = None,
+            cls,
+            model_name_or_path: str,
+            extra_config: ExtraModelConfig | None = None,
+            device: DeviceType | None = None,
+            dtype: torch.dtype | None = None,
     ):
         if extra_config is None:
             extra_config = ExtraModelConfig()
@@ -872,30 +875,30 @@ class LlamaForCausalLM(nn.Module):
         tp_map = {}
         for param_name, _ in self.named_parameters():
             if any(
-                param_name.endswith(suffix)
-                for suffix in [
-                    "q_proj.weight",
-                    "k_proj.weight",
-                    "v_proj.weight",
-                    "up_proj.weight",
-                    "gate_proj.weight",
-                ]
+                    param_name.endswith(suffix)
+                    for suffix in [
+                        "q_proj.weight",
+                        "k_proj.weight",
+                        "v_proj.weight",
+                        "up_proj.weight",
+                        "gate_proj.weight",
+                    ]
             ):
                 tp_map[param_name] = 0
 
             elif any(
-                param_name.endswith(suffix)
-                for suffix in ["o_proj.weight", "down_proj.weight"]
+                    param_name.endswith(suffix)
+                    for suffix in ["o_proj.weight", "down_proj.weight"]
             ):
                 tp_map[param_name] = 1
 
         return tp_map
 
     def load_from_hf_pretrained(
-        self,
-        model_name_or_path: str | Path,
-        device: DeviceType | None = None,
-        dtype: torch.dtype | None = None,
+            self,
+            model_name_or_path: str | Path,
+            device: DeviceType | None = None,
+            dtype: torch.dtype | None = None,
     ):
         hf_model: transformers.LlamaForCausalLM = (
             transformers.AutoModelForCausalLM.from_pretrained(
@@ -928,10 +931,9 @@ class LlamaForCausalLM(nn.Module):
         self.load_state_dict(patched_state_dict, assign=True, strict=False)
 
     def load_from_safetensors(
-        self,
-        model_path: Path,
+            self,
+            model_path: Path,
     ):
-        print("Loading from safetensors model_path", model_path)
         name_to_hf_name = self.make_name_to_hf_name()
         all_hf_names = set(name_to_hf_name.values())
 

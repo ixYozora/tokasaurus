@@ -29,10 +29,8 @@ dependencies = [
     "openai",
     "loguru",
     "python-multipart",
-    "torch==2.6.0",
-    "flashinfer-python==0.2.0.post2",
+    "torch",
     "tqdm",
-    "wandb",
     "boto3",
 ]
 
